@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>מערכת ניהול מלאי</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Barcode Scanner Library -->
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+    <!-- Import Map for React & Icons -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.469.0?external=react"
+      }
+    }
+    </script>
+    
+    <style>
+        /* Base styles for app-like feel */
+        body {
+            -webkit-tap-highlight-color: transparent;
+            overscroll-behavior-y: none;
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        /* Scanner Customization */
+        #reader {
+            border: none !important;
+        }
+        #reader__dashboard_section_csr button {
+            background-color: #2563eb !important;
+            color: white !important;
+            padding: 8px 16px !important;
+            border-radius: 6px !important;
+            border: none !important;
+            font-weight: bold !important;
+            cursor: pointer !important;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+    <div id="root"></div>
+
+    <!-- React Application Code -->
+    <script type="module">
+        import React, { useState, useEffect, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            Package, ArrowRightLeft, ArrowUpCircle, ArrowDownCircle, 
+            Trash2, Save, AlertTriangle, Download, Search, 
+            ArrowRight, Plus, History, QrCode, Scan, Camera, X, CheckCircle, Wrench, Settings, Edit, FileText, Video, RefreshCw, CloudDownload, CloudUpload, Cloud, WifiOff
+        } from 'lucide-react';
+
+        // --- FIREBASE IMPORTS ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy, serverTimestamp 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // ==========================================
+        //  הגדרות FIREBASE
+        // ==========================================
+        const firebaseConfig = {
+            apiKey: "AIzaSyDIybsOYDzpFgD7Q0YkeEE928CNiIORVqo",
+            authDomain: "inventoryapp-367b2.firebaseapp.com",
+            projectId: "inventoryapp-367b2",
+            storageBucket: "inventoryapp-367b2.firebasestorage.app",
+            messagingSenderId: "681674761137",
+            appId: "1:681674761137:web:ab7bf4790c7c676a4b5390",
+            measurementId: "G-N6SEN3WBF0"
+        };
+        // ==========================================
+
+        // Initialize Firebase safely
+        let app, db, auth;
+        let isFirebaseConfigured = false;
+        
+        try {
+            if (firebaseConfig.apiKey !== "PASTE_YOUR_API_KEY_HERE") {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                signInAnonymously(auth).catch(console.error);
+                isFirebaseConfigured = true;
+            }
+        } catch (e) {
+            console.error("Firebase init error:", e);
+        }
+
+        const InventoryApp = () => {
+            // --- State Management ---
+            const [inventory, setInventory] = useState([]);
+            const [history, setHistory] = useState([]);
+            const [currentView, setCurrentView] = useState('home'); 
+            const [searchTerm, setSearchTerm] = useState('');
+            
+            // Google Sync State
+            const [sheetUrl, setSheetUrl] = useState('https://docs.google.com/spreadsheets/d/e/2PACX-1vQT5bz1XbnnXZDBQPHbjH8cPzkyZ1oVQkFGWI4TpQR03zCO4Pwf-S2tunahnm535DyOEoaW0_cJyOeR/pub?output=csv');
+            const [scriptUrl, setScriptUrl] = useState('https://script.google.com/macros/s/AKfycbwtg9n0gfBIRzYz3l8xr7SqD9hkRsJf_S7hO2DiejPEb1HYlXcMHOLOly5LPca4LzaL/exec'); 
+            const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+            const [isConfigOpen, setIsConfigOpen] = useState(false); // For Firebase info modal
+            const [isLoadingSheet, setIsLoadingSheet] = useState(false);
+
+            // Transaction Item State
+            const [transactionItem, setTransactionItem] = useState({ 
+                sku: '', 
+                serialNumber: '', 
+                quantity: '', 
+                name: '',     
+                minStock: 0,
+                exitReason: 'התקנה חדשה' 
+            });
+            
+            // Edit Item State
+            const [editingItem, setEditingItem] = useState(null);
+
+            // UI States
+            const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+            const [notification, setNotification] = useState(null);
+            const [scannerActive, setScannerActive] = useState(false);
+            const [scanTarget, setScanTarget] = useState(null);
+            const [activeTab, setActiveTab] = useState('inventory');
+            const [isProcessingFile, setIsProcessingFile] = useState(false);
+
+            // Refs for file inputs
+            const skuFileInputRef = useRef(null);
+            const serialFileInputRef = useRef(null);
+
+            // Load local settings & Initialize Firebase Listeners
+            useEffect(() => {
+                const savedSheetUrl = localStorage.getItem('sheet_csv_url');
+                const savedScriptUrl = localStorage.getItem('google_script_url');
+                
+                if (savedSheetUrl) setSheetUrl(savedSheetUrl);
+                if (savedScriptUrl) setScriptUrl(savedScriptUrl);
+
+                // --- Firebase Listeners (Real-time Sync) ---
+                if (isFirebaseConfigured && db) {
+                    // Listen to Inventory
+                    const qInventory = query(collection(db, "inventory"), orderBy("name"));
+                    const unsubInventory = onSnapshot(qInventory, (snapshot) => {
+                        const items = snapshot.docs.map(doc => ({
+                            id: doc.id,
+                            ...doc.data()
+                        }));
+                        setInventory(items);
+                    }, (error) => {
+                        console.error("Inventory sync error:", error);
+                        showNotification("שגיאה בסנכרון נתונים מהענן", "error");
+                    });
+
+                    // Listen to History (Limit to last 100 or simply sort)
+                    const qHistory = query(collection(db, "history"), orderBy("timestamp", "desc"));
+                    const unsubHistory = onSnapshot(qHistory, (snapshot) => {
+                        const items = snapshot.docs.map(doc => ({
+                            id: doc.id,
+                            ...doc.data()
+                        }));
+                        setHistory(items);
+                    });
+
+                    return () => {
+                        unsubInventory();
+                        unsubHistory();
+                    };
+                } else {
+                    // Fallback to local storage if Firebase not configured
+                    const savedInventory = localStorage.getItem('inventory_db');
+                    const savedHistory = localStorage.getItem('inventory_history');
+                    if (savedInventory) setInventory(JSON.parse(savedInventory));
+                    if (savedHistory) setHistory(JSON.parse(savedHistory));
+                }
+            }, []);
+
+            // Save settings locally (Inventory/History is saved via Firebase now, but keeping local sync for settings)
+            useEffect(() => {
+                if (!isFirebaseConfigured) {
+                    localStorage.setItem('inventory_db', JSON.stringify(inventory));
+                    localStorage.setItem('inventory_history', JSON.stringify(history));
+                }
+                localStorage.setItem('sheet_csv_url', sheetUrl);
+                localStorage.setItem('google_script_url', scriptUrl);
+            }, [inventory, history, sheetUrl, scriptUrl]);
+
+            // --- Helpers ---
+            const showNotification = (msg, type = 'success') => {
+                setNotification({ msg, type });
+                setTimeout(() => setNotification(null), 4000);
+            };
+
+            const getLowStockItems = () => {
+                return inventory.filter(item => parseInt(item.quantity || 0) < parseInt(item.minStock || 0));
+            };
+
+            const exportToCSV = () => {
+                const BOM = "\uFEFF";
+                let csvContent = BOM + "תאריך,פעולה,שם פריט,מק\"ט,מספר סידורי,כמות,יתרה במלאי\n";
+                history.forEach(h => {
+                    csvContent += `${h.date},${h.type},${h.name},${h.sku},${h.serialNumber},${h.amount},${h.balance}\n`;
+                });
+                
+                const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.setAttribute("href", url);
+                link.setAttribute("download", "inventory_history.csv");
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            // --- Google Sheets Sync Logic ---
+            const fetchFromSheet = async (urlToFetch = sheetUrl, manual = true) => {
+                if (!urlToFetch) return;
+                
+                if (manual) setIsLoadingSheet(true);
+                
+                try {
+                    const response = await fetch(urlToFetch);
+                    if (!response.ok) throw new Error(`שגיאת רשת (${response.status})`);
+                    const text = await response.text();
+                    
+                    const lines = text.split(/\r?\n/).filter(l => l.trim());
+                    if (lines.length < 2) throw new Error("הקובץ ריק או מכיל רק כותרת");
+
+                    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+                    
+                    let nameIdx = headers.findIndex(h => h.includes('שם') || h.includes('name'));
+                    let skuIdx = headers.findIndex(h => h.includes('sku') || h.includes('מק'));
+                    let qtyIdx = headers.findIndex(h => h.includes('כמות') || h.includes('qty'));
+                    let minIdx = headers.findIndex(h => h.includes('מינימום') || h.includes('min'));
+
+                    if (nameIdx === -1) nameIdx = 0;
+                    if (skuIdx === -1) skuIdx = 1;
+                    if (qtyIdx === -1) qtyIdx = 2;
+                    if (minIdx === -1) minIdx = 3;
+
+                    const newInventory = lines.slice(1).map((line, idx) => {
+                        const cols = line.split(',');
+                        const clean = (val) => val ? val.replace(/^"|"$/g, '').trim() : '';
+                        const name = clean(cols[nameIdx]);
+                        const sku = clean(cols[skuIdx]);
+                        if (!name && !sku) return null;
+
+                        return {
+                            // No ID needed here if we push to firebase later, but kept for local
+                            name: name || 'ללא שם',
+                            sku: sku || `GEN-${idx}`,
+                            quantity: parseInt(clean(cols[qtyIdx])) || 0,
+                            minStock: parseInt(clean(cols[minIdx])) || 0,
+                        };
+                    }).filter(i => i !== null);
+
+                    if (newInventory.length > 0) {
+                        // If firebase is on, we might want to merge or replace. 
+                        // For simplicity in this mode, we just update local state if not connected,
+                        // OR (advanced) you could loop and add to firebase. 
+                        // Currently just showing success for local preview/seed.
+                        if (!isFirebaseConfigured) setInventory(newInventory);
+                        
+                        if (manual) showNotification(`הצלחה! נטענו ${newInventory.length} פריטים (לתצוגה מקומית).`);
+                    } else {
+                        throw new Error("לא נמצאו פריטים תקינים בקובץ.");
+                    }
+                } catch (error) {
+                    console.error("Sheet sync error:", error);
+                    if (manual) {
+                        showNotification('שגיאה בטעינת הנתונים: ' + error.message, 'error');
+                    }
+                } finally {
+                    if (manual) setIsLoadingSheet(false);
+                }
+            };
+
+            // --- Write to Google Sheet (Via App Script) ---
+            const sendItemToSheet = async (item) => {
+                if (!scriptUrl) return;
+                try {
+                    await fetch(scriptUrl, {
+                        method: 'POST',
+                        mode: 'no-cors', 
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(item)
+                    });
+                    console.log("Sent item to sheet");
+                } catch (error) {
+                    console.error("Failed to send item to sheet", error);
+                }
+            };
+
+            // --- File Scan Logic (Native Camera) ---
+            const handleFileScan = async (e, target) => {
+                if (!e.target.files || e.target.files.length === 0) return;
+                
+                const file = e.target.files[0];
+                setIsProcessingFile(true);
+
+                const html5QrCode = new window.Html5Qrcode("reader-hidden");
+                
+                try {
+                    const decodedText = await html5QrCode.scanFile(file, false);
+                    handleScanResult(decodedText, target);
+                } catch (err) {
+                    showNotification('לא זוהה ברקוד בתמונה. נסה לקרב או לשפר תאורה.', 'error');
+                } finally {
+                    setIsProcessingFile(false);
+                    e.target.value = '';
+                    html5QrCode.clear();
+                }
+            };
+
+            const triggerFileScan = (target) => {
+                if (target === 'sku' && skuFileInputRef.current) {
+                    skuFileInputRef.current.click();
+                } else if (target === 'serial' && serialFileInputRef.current) {
+                    serialFileInputRef.current.click();
+                }
+            };
+
+            // --- Live Scanner Component ---
+            const BarcodeScanner = ({ onScan, onClose }) => {
+                useEffect(() => {
+                    if (!window.Html5QrcodeScanner) return onClose();
+                    const scanner = new window.Html5QrcodeScanner(
+                        "reader",
+                        { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0, rememberLastUsedCamera: true },
+                        false
+                    );
+                    scanner.render((decodedText) => {
+                        onScan(decodedText);
+                        scanner.clear().catch(console.error);
+                        onClose();
+                    }, () => {});
+                    return () => { scanner.clear().catch(() => {}); };
+                }, []);
+                return React.createElement('div', { className: "fixed inset-0 z-[60] bg-black/90 flex flex-col items-center justify-center p-4" },
+                    React.createElement('div', { className: "bg-white p-4 rounded-xl w-full max-w-md relative" },
+                        React.createElement('button', { onClick: onClose, className: "absolute top-2 right-2 p-2 bg-gray-100 rounded-full hover:bg-gray-200 z-10" }, React.createElement(X, { size: 20 })),
+                        React.createElement('h3', { className: "text-center font-bold mb-4" }, "סריקת וידאו חי"),
+                        React.createElement('div', { id: "reader", className: "w-full bg-gray-100 overflow-hidden rounded-lg" })
+                    )
+                );
+            };
+
+            // --- Handlers (Firebase Connected) ---
+            const handleDeleteItem = async (id) => {
+                if (!isFirebaseConfigured) return showNotification("אין חיבור למסד נתונים", "error");
+                try {
+                    await deleteDoc(doc(db, "inventory", id));
+                    setShowDeleteConfirm(null);
+                    showNotification('הפריט נמחק מהענן');
+                } catch (e) {
+                    showNotification('שגיאה במחיקה: ' + e.message, 'error');
+                }
+            };
+
+            const handleUpdateItem = async (e) => {
+                e.preventDefault();
+                if (!isFirebaseConfigured) return;
+                try {
+                    await updateDoc(doc(db, "inventory", editingItem.id), {
+                        name: editingItem.name,
+                        minStock: parseInt(editingItem.minStock)
+                    });
+                    setEditingItem(null);
+                    showNotification('עודכן בהצלחה');
+                } catch (e) {
+                    showNotification('שגיאה בעדכון', 'error');
+                }
+            };
+
+            const startLiveScan = (target) => {
+                setScanTarget(target);
+                setScannerActive(true);
+            };
+
+            const handleScanResult = (result, target = scanTarget) => {
+                if (target === 'sku') {
+                    setTransactionItem(prev => ({ ...prev, sku: result }));
+                    showNotification('ברקוד נסרק');
+                } else if (target === 'serial') {
+                    setTransactionItem(prev => ({ ...prev, serialNumber: result }));
+                    showNotification('סריאלי נסרק');
+                }
+                setScannerActive(false);
+            };
+
+            const handleTransaction = async (type) => {
+                if (!isFirebaseConfigured) return showNotification("נא להגדיר חיבור ל-Firebase תחילה (או להשתמש ב-Local בגרסה קודמת)", "error");
+
+                const { sku, quantity, serialNumber, name, exitReason, minStock } = transactionItem;
+                const qtyNum = quantity === '' ? 0 : parseInt(quantity);
+                
+                if (!sku || qtyNum <= 0) {
+                    showNotification('נא להזין מק"ט וכמות תקינה', 'error');
+                    return;
+                }
+
+                let foundItem = inventory.find(i => i.sku === sku);
+                let newBalance = 0;
+
+                try {
+                    if (!foundItem) {
+                        if (type === 'out') {
+                            showNotification('מוצר לא קיים במערכת', 'error');
+                            return;
+                        }
+                        if (!name) {
+                            showNotification('חובה להזין שם פריט', 'error');
+                            return;
+                        }
+                        
+                        // Create New Item in Firebase
+                        const docRef = await addDoc(collection(db, "inventory"), {
+                            sku,
+                            name,
+                            quantity: qtyNum,
+                            minStock: parseInt(minStock) || 0,
+                            createdAt: serverTimestamp()
+                        });
+                        newBalance = qtyNum;
+                        foundItem = { id: docRef.id, name, sku }; // Minimal obj for history usage
+
+                        // Sync to Google Sheet if configured
+                        if (scriptUrl) {
+                            sendItemToSheet({ name, sku, quantity: qtyNum, minStock: minStock || 0 });
+                        }
+
+                    } else {
+                        // Update Existing Item in Firebase
+                        let currentQty = parseInt(foundItem.quantity || 0);
+                        if (type === 'out') {
+                            if (currentQty < qtyNum) {
+                                showNotification('אין מספיק מלאי', 'error');
+                                return;
+                            }
+                            newBalance = currentQty - qtyNum;
+                        } else {
+                            newBalance = currentQty + qtyNum;
+                        }
+
+                        await updateDoc(doc(db, "inventory", foundItem.id), {
+                            quantity: newBalance
+                        });
+                    }
+
+                    // Add History Record
+                    let transactionType = '';
+                    if (type === 'in') {
+                        transactionType = (!inventory.some(i=>i.sku===sku)) ? 'הקמה + כניסה' : 'כניסה';
+                    } else {
+                        transactionType = `יציאה (${exitReason})`;
+                    }
+
+                    await addDoc(collection(db, "history"), {
+                        date: new Date().toLocaleString('he-IL'),
+                        timestamp: serverTimestamp(),
+                        type: transactionType,
+                        sku: sku,
+                        name: foundItem.name || name,
+                        amount: qtyNum,
+                        serialNumber: serialNumber || '-',
+                        balance: newBalance
+                    });
+
+                    setTransactionItem({ sku: '', serialNumber: '', quantity: '', name: '', minStock: 0, exitReason: 'התקנה חדשה' });
+                    showNotification(`פעולה בוצעה בהצלחה`);
+
+                } catch (e) {
+                    console.error(e);
+                    showNotification('שגיאה בביצוע פעולה: ' + e.message, 'error');
+                }
+            };
+
+            // --- Render Components ---
+            const SettingsModal = () => (
+                React.createElement('div', { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 animate-fade-in" },
+                    React.createElement('div', { className: "bg-white rounded-xl p-6 max-w-sm w-full shadow-2xl relative max-h-[90vh] overflow-y-auto" },
+                        React.createElement('button', { onClick: () => setIsSettingsOpen(false), className: "absolute top-4 right-4 text-gray-400 hover:text-gray-600" }, React.createElement(X, { size: 24 })),
+                        React.createElement('h3', { className: "text-xl font-bold mb-4 flex items-center gap-2" }, React.createElement(Settings, { size: 20 }), "הגדרות סנכרון"),
+                        
+                        React.createElement('div', { className: "space-y-4" },
+                            // Writing (Apps Script)
+                            React.createElement('div', null,
+                                React.createElement('label', { className: "block text-sm font-bold text-gray-700 mb-1" }, "Google Apps Script URL (עדכון אוטומטי)"),
+                                React.createElement('input', { 
+                                    value: scriptUrl, 
+                                    onChange: (e) => setScriptUrl(e.target.value),
+                                    className: "w-full p-3 border rounded-lg text-sm text-left ltr bg-gray-50 focus:bg-white transition",
+                                    placeholder: "https://script.google.com/..."
+                                })
+                            ),
+                            // Reading (CSV)
+                            React.createElement('div', { className: "pt-4 border-t" },
+                                React.createElement('label', { className: "block text-sm font-bold text-gray-700 mb-1" }, "טעינת נתונים ראשונית (CSV URL)"),
+                                React.createElement('input', { 
+                                    value: sheetUrl, 
+                                    onChange: (e) => setSheetUrl(e.target.value),
+                                    className: "w-full p-3 border rounded-lg text-sm text-left ltr bg-gray-50 focus:bg-white transition mb-2",
+                                    placeholder: "https://docs.google.com/..."
+                                }),
+                                React.createElement('button', { 
+                                    onClick: () => fetchFromSheet(sheetUrl, true),
+                                    className: "w-full bg-blue-100 text-blue-700 py-2 rounded-lg font-bold hover:bg-blue-200 flex items-center justify-center gap-2 text-sm" 
+                                }, 
+                                    isLoadingSheet ? React.createElement('span', { className: "animate-spin" }, "↻") : React.createElement(CloudDownload, { size: 16 }), 
+                                    "יבא נתונים מהגיליון (חד פעמי)"
+                                )
+                            ),
+                        ),
+                        React.createElement('div', { className: "mt-4 text-xs text-center text-gray-400" }, "גרסה 3.2 • Firebase + Google Sync")
+                    )
+                )
+            );
+
+            // Firebase Info Modal (Triggered by red/green cloud icon)
+            const ConfigModal = () => (
+                React.createElement('div', { className: "fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-[100] animate-fade-in" },
+                    React.createElement('div', { className: "bg-white rounded-xl p-6 max-w-lg w-full shadow-2xl relative" },
+                        React.createElement('button', { onClick: () => setIsConfigOpen(false), className: "absolute top-4 right-4 text-gray-400" }, React.createElement(X)),
+                        React.createElement('h3', { className: "text-xl font-bold mb-4 flex items-center gap-2 text-blue-700" }, React.createElement(Cloud, { size: 24 }), "סטטוס חיבור לענן"),
+                        React.createElement('div', { className: "space-y-4" },
+                            isFirebaseConfigured 
+                                ? React.createElement('div', { className: "text-green-600 font-bold flex items-center gap-2" }, React.createElement(CheckCircle), "מחובר בהצלחה ל-Firebase")
+                                : React.createElement('div', { className: "text-red-600 font-bold" }, "לא מחובר. יש לערוך את קובץ הקוד ולהוסיף מפתחות."),
+                            React.createElement('p', { className: "text-sm text-gray-600" }, "Project ID: inventoryapp-367b2"),
+                            React.createElement('button', { onClick: () => setIsConfigOpen(false), className: "w-full bg-blue-600 text-white py-2 rounded-lg font-bold" }, "סגור")
+                        )
+                    )
+                )
+            );
+
+            const Header = ({ title, showBack = true }) => (
+                React.createElement('div', { className: "bg-blue-600 text-white p-4 shadow-md flex items-center justify-between sticky top-0 z-10" },
+                    React.createElement('div', { className: "flex items-center gap-3" },
+                        showBack && React.createElement('button', { onClick: () => setCurrentView('home'), className: "p-2 hover:bg-blue-700 rounded-full transition" }, React.createElement(ArrowRight, { size: 24 })),
+                        React.createElement('h1', { className: "text-xl font-bold" }, title)
+                    ),
+                    React.createElement('div', { className: "flex items-center gap-3" },
+                        React.createElement('div', { className: "text-sm opacity-90 hidden sm:block" }, new Date().toLocaleDateString('he-IL')),
+                        // Cloud Status
+                        React.createElement('div', { 
+                            onClick: () => setIsConfigOpen(true),
+                            className: `p-2 rounded-full cursor-pointer transition shadow-sm ${isFirebaseConfigured ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600 animate-pulse'}`,
+                            title: isFirebaseConfigured ? "מחובר לענן" : "לא מחובר"
+                        }, isFirebaseConfigured ? React.createElement(Cloud, { size: 20 }) : React.createElement(WifiOff, { size: 20 })),
+                        // Settings Cog
+                        React.createElement('button', { onClick: () => setIsSettingsOpen(true), className: "p-2 bg-blue-500 rounded-full hover:bg-blue-400 transition shadow-sm" }, React.createElement(Settings, { size: 20 }))
+                    )
+                )
+            );
+
+            const renderContent = () => {
+                if (currentView === 'home') {
+                    const lowStockCount = getLowStockItems().length;
+                    return React.createElement('div', { className: "min-h-screen bg-gray-100 flex flex-col" },
+                        React.createElement('div', { className: "bg-blue-700 text-white p-6 pb-24 shadow-lg relative" },
+                            React.createElement('div', { className: "max-w-4xl mx-auto" },
+                                React.createElement('h1', { className: "text-3xl font-bold mb-2" }, "ניהול מלאי חכם"),
+                                React.createElement('p', { className: "opacity-80" }, isFirebaseConfigured ? "מחובר למסד נתונים בענן (Firebase)" : "מצב לא מקוון")
+                            )
+                        ),
+                        React.createElement('div', { className: "max-w-4xl mx-auto w-full px-4 -mt-16 grid grid-cols-1 md:grid-cols-3 gap-6" },
+                            React.createElement('button', { onClick: () => setCurrentView('in'), className: "bg-white p-6 rounded-2xl shadow-lg hover:shadow-xl transition transform hover:-translate-y-1 flex flex-col items-center justify-center gap-4 group" },
+                                React.createElement('div', { className: "bg-green-100 p-4 rounded-full group-hover:bg-green-200 transition" }, React.createElement(ArrowDownCircle, { size: 40, className: "text-green-600" })),
+                                React.createElement('div', { className: "text-center" }, React.createElement('span', { className: "block text-xl font-bold text-gray-800" }, "מלאי נכנס"), React.createElement('span', { className: "text-sm text-gray-500" }, "קליטת סחורה"))
+                            ),
+                            React.createElement('button', { onClick: () => setCurrentView('out'), className: "bg-white p-6 rounded-2xl shadow-lg hover:shadow-xl transition transform hover:-translate-y-1 flex flex-col items-center justify-center gap-4 group" },
+                                React.createElement('div', { className: "bg-red-100 p-4 rounded-full group-hover:bg-red-200 transition" }, React.createElement(ArrowUpCircle, { size: 40, className: "text-red-600" })),
+                                React.createElement('div', { className: "text-center" }, React.createElement('span', { className: "block text-xl font-bold text-gray-800" }, "מלאי יוצא"), React.createElement('span', { className: "text-sm text-gray-500" }, "ניפוק / מכירה"))
+                            ),
+                            React.createElement('button', { onClick: () => setCurrentView('manage'), className: "bg-white p-6 rounded-2xl shadow-lg hover:shadow-xl transition transform hover:-translate-y-1 flex flex-col items-center justify-center gap-4 group" },
+                                React.createElement('div', { className: "bg-blue-100 p-4 rounded-full group-hover:bg-blue-200 transition" }, React.createElement(Package, { size: 40, className: "text-blue-600" })),
+                                React.createElement('div', { className: "text-center" }, React.createElement('span', { className: "block text-xl font-bold text-gray-800" }, "ניהול מלאי"), React.createElement('span', { className: "text-sm text-gray-500" }, "דוחות וייצוא"))
+                            )
+                        ),
+                        React.createElement('div', { className: "max-w-4xl mx-auto w-full mt-8 px-4 grid grid-cols-2 gap-4" },
+                            React.createElement('div', { className: "bg-white p-5 rounded-xl shadow-sm border border-gray-100" },
+                                React.createElement('span', { className: "text-gray-500 text-sm" }, "סה\"כ פריטים"),
+                                React.createElement('div', { className: "text-3xl font-bold text-blue-900 mt-1" }, inventory.length)
+                            ),
+                            React.createElement('div', { className: "bg-white p-5 rounded-xl shadow-sm border border-gray-100" },
+                                React.createElement('span', { className: "text-gray-500 text-sm" }, "טעוני הזמנה"),
+                                React.createElement('div', { className: `text-3xl font-bold mt-1 ${lowStockCount > 0 ? 'text-red-600' : 'text-green-600'}` }, lowStockCount)
+                            )
+                        )
+                    );
+                }
+
+                if (currentView === 'in' || currentView === 'out') {
+                    const isIncoming = currentView === 'in';
+                    const foundItem = inventory.find(i => i.sku === transactionItem.sku);
+                    const isNewItem = isIncoming && !foundItem && transactionItem.sku.length > 0;
+
+                    return React.createElement('div', { className: "min-h-screen bg-gray-50 pb-20" },
+                        React.createElement(Header, { title: isIncoming ? "קליטת מלאי (נכנס)" : "שחרור מלאי (יוצא)" }),
+                        React.createElement('div', { className: "p-4 max-w-lg mx-auto space-y-6" },
+                            React.createElement('div', { className: "bg-white p-6 rounded-xl shadow-sm border border-gray-100" },
+                                React.createElement('div', { className: "flex flex-col gap-4" },
+                                    
+                                    // Hidden Reader Div for File Scan
+                                    React.createElement('div', { id: "reader-hidden", className: "hidden" }),
+                                    
+                                    // Hidden File Inputs
+                                    React.createElement('input', { type: "file", accept: "image/*", capture: "environment", ref: skuFileInputRef, onChange: (e) => handleFileScan(e, 'sku'), className: "hidden" }),
+                                    React.createElement('input', { type: "file", accept: "image/*", capture: "environment", ref: serialFileInputRef, onChange: (e) => handleFileScan(e, 'serial'), className: "hidden" }),
+
+                                    React.createElement('div', null,
+                                        React.createElement('label', { className: "text-gray-700 font-medium mb-1 block" }, "סרוק ברקוד / הקלד מק\"ט"),
+                                        React.createElement('div', { className: "flex gap-2" },
+                                            React.createElement('div', { className: "relative flex-1" },
+                                                React.createElement('input', {
+                                                    type: "text",
+                                                    value: transactionItem.sku,
+                                                    onChange: (e) => setTransactionItem({...transactionItem, sku: e.target.value}),
+                                                    className: "w-full p-4 pl-12 border-2 border-blue-100 rounded-lg text-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition",
+                                                    placeholder: "סרוק כאן...",
+                                                    onKeyDown: (e) => { if (e.key === 'Enter') handleTransaction(currentView); }
+                                                }),
+                                                React.createElement(QrCode, { className: "absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" })
+                                            ),
+                                            React.createElement('button', { onClick: () => triggerFileScan('sku'), className: "bg-blue-600 text-white p-4 rounded-lg hover:bg-blue-700 transition shadow-sm flex flex-col items-center justify-center min-w-[60px]" }, React.createElement(Camera, { size: 24 }), React.createElement('span', { className: "text-[10px] mt-1" }, "צלם")),
+                                            React.createElement('button', { onClick: () => startLiveScan('sku'), className: "bg-gray-200 text-gray-700 p-4 rounded-lg hover:bg-gray-300 transition shadow-sm flex flex-col items-center justify-center min-w-[60px]" }, React.createElement(Video, { size: 24 }), React.createElement('span', { className: "text-[10px] mt-1" }, "וידאו"))
+                                        )
+                                    ),
+                                    foundItem ? React.createElement('div', { className: "bg-blue-50 p-4 rounded-lg border border-blue-100 animate-fade-in" },
+                                        React.createElement('p', { className: "text-sm text-gray-500" }, "מוצר זוהה:"),
+                                        React.createElement('p', { className: "text-xl font-bold text-blue-900" }, foundItem.name),
+                                        React.createElement('p', { className: "text-gray-600" }, "מלאי נוכחי: ", foundItem.quantity)
+                                    ) : (isNewItem ? 
+                                        React.createElement('div', { className: "bg-green-50 p-4 rounded-lg border border-green-100 animate-fade-in space-y-3" },
+                                            React.createElement('div', { className: "flex items-center gap-2 text-green-700 font-bold mb-1" }, React.createElement(Plus, { size: 18 }), "מוצר חדש זוהה"),
+                                            React.createElement('input', { placeholder: "שם פריט (חובה)", value: transactionItem.name, onChange: (e) => setTransactionItem({...transactionItem, name: e.target.value}), className: "w-full p-2 border border-green-200 rounded focus:ring-2 focus:ring-green-200 outline-none" }),
+                                            React.createElement('input', { type: "number", placeholder: "מלאי מינימום (למעקב)", value: transactionItem.minStock, onChange: (e) => setTransactionItem({...transactionItem, minStock: e.target.value}), className: "w-full p-2 border border-green-200 rounded focus:ring-2 focus:ring-green-200 outline-none" })
+                                        ) : (transactionItem.sku ? React.createElement('p', { className: "text-red-500 text-sm" }, isIncoming ? "פריט לא נמצא" : "מוצר לא נמצא במערכת") : null)),
+                                    
+                                    !isIncoming && React.createElement('div', { className: "bg-gray-50 p-3 rounded-lg border border-gray-200" },
+                                        React.createElement('span', { className: "block text-sm text-gray-500 mb-2" }, "סיבת ניפוק:"),
+                                        React.createElement('div', { className: "flex gap-3" },
+                                            React.createElement('label', { className: "flex-1 relative cursor-pointer" },
+                                                React.createElement('input', { type: "radio", name: "exitReason", className: "peer sr-only", checked: transactionItem.exitReason === 'התקנה חדשה', onChange: () => setTransactionItem(prev => ({ ...prev, exitReason: 'התקנה חדשה' })) }),
+                                                React.createElement('div', { className: "p-3 text-center rounded-md border-2 border-transparent bg-white shadow-sm transition-all peer-checked:border-blue-500 peer-checked:bg-blue-50 peer-checked:text-blue-700 flex items-center justify-center gap-2" }, React.createElement(Settings, { size: 16 }), "התקנה חדשה")
+                                            ),
+                                            React.createElement('label', { className: "flex-1 relative cursor-pointer" },
+                                                React.createElement('input', { type: "radio", name: "exitReason", className: "peer sr-only", checked: transactionItem.exitReason === 'תיקון החלפה', onChange: () => setTransactionItem(prev => ({ ...prev, exitReason: 'תיקון החלפה' })) }),
+                                                React.createElement('div', { className: "p-3 text-center rounded-md border-2 border-transparent bg-white shadow-sm transition-all peer-checked:border-blue-500 peer-checked:bg-blue-50 peer-checked:text-blue-700 flex items-center justify-center gap-2" }, React.createElement(Wrench, { size: 16 }), "תיקון החלפה")
+                                            )
+                                        )
+                                    ),
+                                    React.createElement('div', { className: "flex flex-col sm:flex-row gap-4" },
+                                        React.createElement('div', { className: "flex-[2]" },
+                                            React.createElement('label', { className: "text-sm text-gray-500 block mb-1" }, "מספר סידורי (אופציונלי)"),
+                                            React.createElement('div', { className: "flex gap-2" },
+                                                React.createElement('div', { className: "relative flex-1" },
+                                                    React.createElement('input', { type: "text", value: transactionItem.serialNumber, onChange: (e) => setTransactionItem({...transactionItem, serialNumber: e.target.value}), className: "w-full p-3 pl-10 border border-gray-200 rounded-lg text-lg focus:border-blue-500 outline-none", placeholder: "הקלד סריאלי..." }),
+                                                    React.createElement(Scan, { className: "absolute left-3 top-1/2 -translate-y-1/2 text-gray-400", size: 18 })
+                                                ),
+                                                React.createElement('button', { onClick: () => triggerFileScan('serial'), className: "bg-gray-100 text-gray-700 p-3 rounded-lg hover:bg-gray-200 transition border border-gray-300", title: "צלם סריאלי" }, React.createElement(Camera, { size: 20 }))
+                                            )
+                                        ),
+                                        React.createElement('div', { className: "w-full sm:w-28" },
+                                            React.createElement('label', { className: "text-sm text-gray-500 block mb-1" }, "כמות"),
+                                            React.createElement('input', { type: "text", inputMode: "numeric", pattern: "[0-9]*", value: transactionItem.quantity, placeholder: "0", onChange: (e) => { const val = e.target.value; if (val === '' || /^\d+$/.test(val)) setTransactionItem({...transactionItem, quantity: val}); }, className: "w-full p-3 border border-gray-200 rounded-lg text-center font-bold text-lg focus:border-blue-500 outline-none" })
+                                        )
+                                    ),
+                                    React.createElement('button', { onClick: () => handleTransaction(currentView), disabled: (!foundItem && !isNewItem && isIncoming) || (!foundItem && !isIncoming), className: `w-full py-3 mt-2 rounded-lg font-bold text-white shadow-md transition-transform active:scale-95 flex justify-center items-center gap-2 ${isIncoming ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'} ${(!foundItem && !isNewItem) ? 'opacity-50 cursor-not-allowed' : ''}` }, isIncoming ? React.createElement(ArrowDownCircle, null) : React.createElement(ArrowUpCircle, null), isIncoming ? (isNewItem ? 'הקם פריט והכנס למלאי' : 'הוסף למלאי') : 'הוצא ממלאי')
+                                ),
+                            ),
+                            React.createElement('div', { className: "text-center text-sm text-gray-400" }, "טיפ: ניתן לצלם את הברקוד (כפתור כחול) או להקליד ידנית")
+                        )
+                    );
+                }
+
+                if (currentView === 'manage') {
+                    const lowStock = getLowStockItems();
+                    return React.createElement('div', { className: "min-h-screen bg-gray-50 pb-20" },
+                        React.createElement(Header, { title: "ניהול קטלוג מוצרים" }),
+                        React.createElement('div', { className: "p-4 max-w-4xl mx-auto space-y-6" },
+                            React.createElement('div', { className: "bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden" },
+                                React.createElement('div', { className: "p-4 bg-gray-50 border-b flex flex-wrap gap-4 items-center justify-between" },
+                                    React.createElement('div', { className: "flex gap-2" },
+                                        React.createElement('button', { onClick: () => setActiveTab('inventory'), className: `px-4 py-2 rounded-lg text-sm font-bold transition ${activeTab === 'inventory' ? 'bg-blue-600 text-white shadow' : 'bg-white text-gray-600 border'}` }, "מלאי נוכחי"),
+                                        React.createElement('button', { onClick: () => setActiveTab('history'), className: `px-4 py-2 rounded-lg text-sm font-bold transition ${activeTab === 'history' ? 'bg-blue-600 text-white shadow' : 'bg-white text-gray-600 border'}` }, "יומן תנועות")
+                                    ),
+                                    React.createElement('div', { className: "relative" },
+                                        React.createElement(Search, { className: "absolute right-3 top-1/2 -translate-y-1/2 text-gray-400", size: 16 }),
+                                        React.createElement('input', { placeholder: "חיפוש...", className: "pr-9 pl-3 py-1.5 border rounded-full text-sm w-48 focus:outline-none focus:border-blue-500", value: searchTerm, onChange: (e) => setSearchTerm(e.target.value) })
+                                    ),
+                                    React.createElement('button', { onClick: exportToCSV, className: "flex items-center gap-2 text-green-600 hover:bg-green-50 px-3 py-1.5 rounded transition text-sm font-medium border border-green-200" }, React.createElement(Download, { size: 16 }), "ייצוא (CSV)")
+                                ),
+                                activeTab === 'inventory' ? (
+                                    React.createElement('div', { className: "overflow-x-auto" },
+                                        React.createElement('table', { className: "w-full text-right text-sm" },
+                                            React.createElement('thead', { className: "bg-gray-50 text-gray-600" },
+                                                React.createElement('tr', null,
+                                                    React.createElement('th', { className: "p-3" }, "שם פריט"),
+                                                    React.createElement('th', { className: "p-3" }, "מק\"ט"),
+                                                    React.createElement('th', { className: "p-3" }, "כמות"),
+                                                    React.createElement('th', { className: "p-3" }, "מינימום"),
+                                                    React.createElement('th', { className: "p-3" }, "סטטוס"),
+                                                    React.createElement('th', { className: "p-3 text-left" }, "פעולות")
+                                                )
+                                            ),
+                                            React.createElement('tbody', { className: "divide-y" },
+                                                inventory.filter(i => i.name.includes(searchTerm) || i.sku.includes(searchTerm)).map(item => {
+                                                    const isLow = parseInt(item.quantity) < parseInt(item.minStock);
+                                                    return React.createElement('tr', { key: item.id, className: "hover:bg-gray-50" },
+                                                        React.createElement('td', { className: "p-3 font-medium" }, item.name),
+                                                        React.createElement('td', { className: "p-3 font-mono text-gray-500" }, item.sku),
+                                                        React.createElement('td', { className: `p-3 font-bold ${isLow ? 'text-red-600' : 'text-gray-800'}` }, item.quantity),
+                                                        React.createElement('td', { className: "p-3 text-gray-500" }, item.minStock),
+                                                        React.createElement('td', { className: "p-3" }, isLow && React.createElement('span', { className: "inline-flex items-center gap-1 bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-xs" }, React.createElement(AlertTriangle, { size: 12 }), "להזמין")),
+                                                        React.createElement('td', { className: "p-3 text-left flex gap-2 justify-end" }, 
+                                                            React.createElement('button', { onClick: () => setEditingItem(item), className: "text-gray-400 hover:text-blue-500 p-1", title: "עריכה" }, React.createElement(Edit, { size: 18 })),
+                                                            React.createElement('button', { onClick: () => handleDeleteItem(item.id), className: "text-gray-400 hover:text-red-500 p-1", title: "מחיקה" }, React.createElement(Trash2, { size: 18 }))
+                                                        )
+                                                    );
+                                                }),
+                                                inventory.length === 0 && React.createElement('tr', null, React.createElement('td', { colSpan: "6", className: "p-8 text-center text-gray-400" }, "אין פריטים במערכת"))
+                                            )
+                                        )
+                                    )
+                                ) : (
+                                    React.createElement('div', { className: "overflow-x-auto" },
+                                        React.createElement('table', { className: "w-full text-right text-sm" },
+                                            React.createElement('thead', { className: "bg-gray-50 text-gray-600" },
+                                                React.createElement('tr', null,
+                                                    React.createElement('th', { className: "p-3" }, "תאריך"),
+                                                    React.createElement('th', { className: "p-3" }, "סוג פעולה"),
+                                                    React.createElement('th', { className: "p-3" }, "פריט"),
+                                                    React.createElement('th', { className: "p-3" }, "מס' סידורי"),
+                                                    React.createElement('th', { className: "p-3" }, "כמות"),
+                                                    React.createElement('th', { className: "p-3" }, "יתרה")
+                                                )
+                                            ),
+                                            React.createElement('tbody', { className: "divide-y" },
+                                                history.filter(h => h.name.includes(searchTerm) || h.sku.includes(searchTerm) || h.serialNumber.includes(searchTerm)).map(h => (
+                                                    React.createElement('tr', { key: h.id, className: "hover:bg-gray-50" },
+                                                        React.createElement('td', { className: "p-3 text-gray-500 whitespace-nowrap" }, h.date),
+                                                        React.createElement('td', { className: "p-3 font-medium" }, h.type),
+                                                        React.createElement('td', { className: "p-3" }, React.createElement('div', null, h.name), React.createElement('div', { className: "text-xs text-gray-400" }, h.sku)),
+                                                        React.createElement('td', { className: "p-3 font-mono text-xs" }, h.serialNumber),
+                                                        React.createElement('td', { className: "p-3 font-bold" }, h.amount),
+                                                        React.createElement('td', { className: "p-3 text-gray-500" }, h.balance)
+                                                    )
+                                                )),
+                                                history.length === 0 && React.createElement('tr', null, React.createElement('td', { colSpan: "6", className: "p-8 text-center text-gray-400" }, "אין היסטוריית תנועות"))
+                                            )
+                                        )
+                                    )
+                                )
+                            ),
+                            lowStock.length > 0 && React.createElement('div', { className: "bg-red-50 border border-red-200 p-4 rounded-xl" },
+                                React.createElement('h4', { className: "text-red-800 font-bold flex items-center gap-2 mb-2" }, React.createElement(AlertTriangle, { size: 20 }), `התראות מלאי נמוך (${lowStock.length})`),
+                                React.createElement('ul', { className: "list-disc list-inside text-sm text-red-700" }, lowStock.map(item => React.createElement('li', { key: item.id }, React.createElement('b', null, item.name), ` (נותרו: ${item.quantity}, מינימום: ${item.minStock})`)))
+                            ),
+                            showDeleteConfirm && React.createElement('div', { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" },
+                                React.createElement('div', { className: "bg-white rounded-xl p-6 max-w-sm w-full shadow-2xl" },
+                                    React.createElement('h3', { className: "text-xl font-bold mb-2" }, "מחיקת מוצר"),
+                                    React.createElement('p', { className: "text-gray-600 mb-6" }, "האם למחוק את ", React.createElement('b', null, showDeleteConfirm.name), "?"),
+                                    React.createElement('div', { className: "flex gap-3" },
+                                        React.createElement('button', { onClick: () => setShowDeleteConfirm(null), className: "flex-1 py-2 rounded-lg bg-gray-100 text-gray-700 font-medium hover:bg-gray-200" }, "ביטול"),
+                                        React.createElement('button', { onClick: () => handleDeleteItem(showDeleteConfirm.id), className: "flex-1 py-2 rounded-lg bg-red-600 text-white font-medium hover:bg-red-700" }, "מחק")
+                                    )
+                                )
+                            ),
+                            editingItem && React.createElement('div', { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" },
+                                React.createElement('div', { className: "bg-white rounded-xl p-6 max-w-sm w-full shadow-2xl" },
+                                    React.createElement('h3', { className: "text-xl font-bold mb-4" }, "עריכת פריט"),
+                                    React.createElement('form', { onSubmit: handleUpdateItem, className: "space-y-4" },
+                                        React.createElement('div', null,
+                                            React.createElement('label', { className: "block text-sm text-gray-600 mb-1" }, "שם פריט"),
+                                            React.createElement('input', { className: "w-full p-2 border rounded", value: editingItem.name, onChange: e => setEditingItem({...editingItem, name: e.target.value}), required: true })
+                                        ),
+                                        React.createElement('div', null,
+                                            React.createElement('label', { className: "block text-sm text-gray-600 mb-1" }, "מלאי מינימום"),
+                                            React.createElement('input', { type: "number", className: "w-full p-2 border rounded", value: editingItem.minStock, onChange: e => setEditingItem({...editingItem, minStock: e.target.value}), required: true })
+                                        ),
+                                        React.createElement('div', { className: "flex gap-3 pt-2" },
+                                            React.createElement('button', { type: "button", onClick: () => setEditingItem(null), className: "flex-1 py-2 rounded-lg bg-gray-100 text-gray-700 font-medium hover:bg-gray-200" }, "ביטול"),
+                                            React.createElement('button', { type: "submit", className: "flex-1 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700" }, "שמור שינויים")
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    );
+                }
+            };
+
+            return React.createElement(React.Fragment, null,
+                notification && React.createElement('div', { className: `fixed top-4 right-1/2 translate-x-1/2 z-50 px-6 py-3 rounded-full shadow-lg text-white font-medium animate-bounce ${notification.type === 'error' ? 'bg-red-500' : 'bg-green-600'}` }, notification.msg),
+                isConfigOpen && React.createElement(ConfigModal),
+                isSettingsOpen && React.createElement(SettingsModal),
+                scannerActive && React.createElement(BarcodeScanner, { onScan: handleScanResult, onClose: () => setScannerActive(false) }),
+                renderContent()
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(React.createElement(InventoryApp));
+    </script>
+</body>
+</html>
